@@ -90,8 +90,13 @@ export interface IncidentsData {
  * across all three of its views (the same "share one expensive fetch"
  * shape as getSeasonOverallContext elsewhere in this codebase).
  */
-export async function getAllIncidents(env: SupabaseEnv): Promise<IncidentsData> {
-  const rounds = await getAllRounds(env);
+export async function getAllIncidents(env: SupabaseEnv, opts: { seasonId?: string } = {}): Promise<IncidentsData> {
+  const allRounds = await getAllRounds(env);
+  // Season filter (History → Incidents' Season dropdown) — narrowed here,
+  // before any other fetch, so every downstream number (By Driver's
+  // racesStarted denominator included) is scoped to that one season rather
+  // than filtered after the fact from all-time totals.
+  const rounds = opts.seasonId ? allRounds.filter((r) => r.season_id === opts.seasonId) : allRounds;
   const subsessionIds = rounds.map((r) => r.subsession_id);
 
   const [allPenalties, postedRoundIds, driversBasic, offenses, excludedRoundIds, raceStartRows] = await Promise.all([

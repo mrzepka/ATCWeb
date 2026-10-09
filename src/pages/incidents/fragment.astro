@@ -1,9 +1,11 @@
 ---
 export const prerender = false;
 
-import { resolveSupabaseEnv, displayDriverName, shortDriverName, formatDateShort } from '../../lib/supabase';
+import { resolveSupabaseEnv, displayDriverName, shortDriverName, formatDateShort, getSeasons } from '../../lib/supabase';
 import HistoryTabs from '../../components/HistoryTabs.astro';
 import { getAllIncidents, type IncidentRow } from '../../lib/incidents';
+import { isChampionshipSeason } from '../../lib/results';
+import { seasonOptionAttrs } from '../../lib/seasonSelect';
 
 /**
  * Same shell-then-spinner split as driver-stats/fragment.astro —
@@ -21,14 +23,37 @@ import { getAllIncidents, type IncidentRow } from '../../lib/incidents';
 
 const supabaseEnv = resolveSupabaseEnv(Astro.locals);
 
+// Season filter — same `?season=<number>` query param (and same
+// Championships/Exhibitions optgroup split) as results/fragment.astro's
+// season picker. incidents.astro forwards its own query string onto this
+// fragment's URL, and the filter <form> below submits back to
+// /incidents itself (a GET form's default action is the current page), so
+// a filtered view is a real, shareable URL. No param (or an unknown one)
+// means every season — this page's original all-time behaviour.
+//
+// `?view=` rides along on the same form submit purely so changing season
+// keeps whichever of the three views was open, instead of snapping back to
+// All Incidents.
+const VIEWS = ['all', 'byDriver', 'byOffense'] as const;
+type View = (typeof VIEWS)[number];
+const requestedView = Astro.url.searchParams.get('view');
+const activeView: View = (VIEWS as readonly string[]).includes(requestedView ?? '') ? (requestedView as View) : 'all';
+
 let loadError: string | null = null;
+let seasons: Awaited<ReturnType<typeof getSeasons>> = [];
+let activeSeason: (typeof seasons)[number] | null = null;
 let data: Awaited<ReturnType<typeof getAllIncidents>> = { all: [], byDriver: [], byOffense: [] };
 try {
-  data = await getAllIncidents(supabaseEnv);
+  seasons = await getSeasons(supabaseEnv);
+  activeSeason = seasons.find((s) => String(s.number) === Astro.url.searchParams.get('season')) ?? null;
+  data = await getAllIncidents(supabaseEnv, { seasonId: activeSeason?.id });
 } catch (err) {
   console.error('Failed to load incidents (fragment):', err);
   loadError = err instanceof Error ? err.message : String(err);
 }
+
+const championshipSeasons = seasons.filter((s) => isChampionshipSeason(s.name));
+const exhibitionSeasons = seasons.filter((s) => !isChampionshipSeason(s.name));
 
 function sessionLabel(row: IncidentRow): string {
   if (row.sessionType === 'qualifying') return 'Qualifying';
@@ -76,24 +101,48 @@ Astro.response.headers.set('Cache-Control', 'public, s-maxage=60, stale-while-re
 
 {!loadError && (
   <div data-incidents-widget>
-    <div class="reveal is-visible relative z-30 mt-12 rounded-xl border border-white/10 bg-brand-ink p-4">
+    <form method="GET" class="reveal is-visible relative z-30 mt-12 rounded-xl border border-white/10 bg-brand-ink p-4">
      <div class="flex flex-wrap items-end gap-3">
       <HistoryTabs active="incidents" />
+      <label class="flex flex-col gap-1.5 sm:w-44">
+        <span class="text-xs font-semibold uppercase tracking-wide text-white/40">Season</span>
+        <select
+          name="season"
+          aria-label="Season"
+          data-logo-select
+          onchange="this.form.submit()"
+          class="h-9 w-full rounded-md border border-white/15 bg-transparent px-3 text-sm text-white outline-none hover:bg-white/5 focus:border-brand-primary focus:bg-white/5"
+        >
+          <option value="" selected={!activeSeason} class="bg-brand-ink text-white">All Seasons</option>
+          <optgroup label="Championships" class="bg-brand-ink text-white">
+            {championshipSeasons.map((s) => (
+              <option value={s.number} selected={s.id === activeSeason?.id} {...seasonOptionAttrs(s)} class="bg-brand-ink text-white">{s.name}</option>
+            ))}
+          </optgroup>
+          {exhibitionSeasons.length > 0 && (
+            <optgroup label="Exhibitions" class="bg-brand-ink text-white">
+              {exhibitionSeasons.map((s) => (
+                <option value={s.number} selected={s.id === activeSeason?.id} {...seasonOptionAttrs(s)} class="bg-brand-ink text-white">{s.name}</option>
+              ))}
+            </optgroup>
+          )}
+        </select>
+      </label>
       <label class="flex flex-col gap-1.5 sm:w-56">
         <span class="text-xs font-semibold uppercase tracking-wide text-white/40">View</span>
-        <select aria-label="View" data-incidents-select class="h-9 w-full rounded-md border border-white/15 bg-transparent px-3 text-sm text-white outline-none hover:bg-white/5 focus:border-brand-primary focus:bg-white/5">
-          <option value="all" selected class="bg-brand-ink text-white">All Incidents ({data.all.length})</option>
-          <option value="byDriver" class="bg-brand-ink text-white">By Driver ({data.byDriver.length})</option>
-          <option value="byOffense" class="bg-brand-ink text-white">By Offense ({data.byOffense.length})</option>
+        <select name="view" aria-label="View" data-incidents-select class="h-9 w-full rounded-md border border-white/15 bg-transparent px-3 text-sm text-white outline-none hover:bg-white/5 focus:border-brand-primary focus:bg-white/5">
+          <option value="all" selected={activeView === 'all'} class="bg-brand-ink text-white">All Incidents ({data.all.length})</option>
+          <option value="byDriver" selected={activeView === 'byDriver'} class="bg-brand-ink text-white">By Driver ({data.byDriver.length})</option>
+          <option value="byOffense" selected={activeView === 'byOffense'} class="bg-brand-ink text-white">By Offense ({data.byOffense.length})</option>
         </select>
       </label>
      </div>
-    </div>
+    </form>
 
     <!-- ================= All Incidents ================= -->
-    <div data-incidents-panel="all" class="mt-6">
+    <div data-incidents-panel="all" class:list={['mt-6', { hidden: activeView !== 'all' }]}>
       {data.all.length === 0 ? (
-        <p class="mt-6 text-white/60">No incidents logged yet.</p>
+        <p class="mt-6 text-white/60">{activeSeason ? `No incidents logged for ${activeSeason.name}.` : 'No incidents logged yet.'}</p>
       ) : (
         <div class="rounded-xl border border-white/10" data-sticky-thead>
           <table class="w-full min-w-[1100px] border-collapse" data-sortable>
@@ -189,9 +238,9 @@ Astro.response.headers.set('Cache-Control', 'public, s-maxage=60, stale-while-re
     </div>
 
     <!-- ================= By Driver ================= -->
-    <div data-incidents-panel="byDriver" class="mt-6 hidden">
+    <div data-incidents-panel="byDriver" class:list={['mt-6', { hidden: activeView !== 'byDriver' }]}>
       {data.byDriver.length === 0 ? (
-        <p class="mt-6 text-white/60">No incidents logged yet.</p>
+        <p class="mt-6 text-white/60">{activeSeason ? `No incidents logged for ${activeSeason.name}.` : 'No incidents logged yet.'}</p>
       ) : (
         <div class="rounded-xl border border-white/10" data-sticky-thead>
           <table class="w-full border-collapse" data-sortable>
@@ -284,9 +333,9 @@ Astro.response.headers.set('Cache-Control', 'public, s-maxage=60, stale-while-re
     </div>
 
     <!-- ================= By Offense ================= -->
-    <div data-incidents-panel="byOffense" class="mt-6 hidden">
+    <div data-incidents-panel="byOffense" class:list={['mt-6', { hidden: activeView !== 'byOffense' }]}>
       {data.byOffense.length === 0 ? (
-        <p class="mt-6 text-white/60">No incidents logged yet.</p>
+        <p class="mt-6 text-white/60">{activeSeason ? `No incidents logged for ${activeSeason.name}.` : 'No incidents logged yet.'}</p>
       ) : (
         <div class="rounded-xl border border-white/10" data-sticky-thead>
           <table class="w-full border-collapse" data-sortable>
